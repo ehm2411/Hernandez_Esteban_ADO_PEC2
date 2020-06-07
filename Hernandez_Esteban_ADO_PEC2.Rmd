@@ -77,13 +77,17 @@ counts_ELI <- counts[,sample_ELI]
 
 # fichero de contaje: cts
 cts0 <- cbind(counts_NTI,counts_SFI,counts_ELI)
-nombrescol <- c(paste("NIT",1:10,sep=""),paste("SFI",1:10,sep=""),paste("ELI",1:10,sep=""))
+#cts0 <- cbind(counts_NTI,counts_SFI)
+muestra <- c(paste("NIT",1:10,sep=""),paste("SFI",1:10,sep=""),paste("ELI",1:10,sep=""))
+#muestra <- c(paste("NIT",1:10,sep=""),paste("SFI",1:10,sep=""))
 
-colnames(cts0) <- nombrescol
+colnames(cts0) <- muestra
 
 # fichero de información de las muestras
-coldata <- data.frame(nombrescol,type=c(rep("NIT",10),rep("SFI",10),rep("ELI",10)))
+coldata <- data.frame(muestra,type=c(rep("NIT",10),rep("SFI",10),rep("ELI",10)))
 coldata$type <- factor(coldata$type, levels = c("NIT","SFI","ELI"))
+#coldata <- data.frame(muestra,type=c(rep("NIT",10),rep("SFI",10)))
+#coldata$type <- factor(coldata$type, levels = c("NIT","SFI"))
 ```
 
 Tenemos ya nuestros ficheros disponibles, pero podemos ver que muchas filas (genes) no tienen ningún o poco contaje en ninguna de las muestras. Esto lo podemos comprobar considerando el máximo valor por fila. También veremos el máximo contaje por muestra, para ver en que rango se mueve sus respectivos máximos. 
@@ -177,7 +181,7 @@ library("pheatmap")
 library("RColorBrewer")
 
 sampleDistMatrix <- as.matrix( sampleDists )
-rownames(sampleDistMatrix) <- paste( vsd$type, vsd$nombrescol, sep = " - " )
+rownames(sampleDistMatrix) <- paste( vsd$type, vsd$muestra, sep = " - " )
 colnames(sampleDistMatrix) <- NULL
 colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
 pheatmap(sampleDistMatrix,
@@ -188,5 +192,131 @@ pheatmap(sampleDistMatrix,
 
 PCA plots
 ```{r}
-plotPCA(vsd, intgroup  = c("NIT", "SFI"))
+plotPCA(vsd, intgroup  = c("type","muestra"))
 ```
+
+
+3.7 Differential Expression Analysis
+
+```{r}
+dds <- DESeq(dds, parallel =TRUE)
+```
+
+
+```{r}
+resNITSFI <- results(dds, contrast=c("type","NIT","SFI"))
+resNITSFI
+res <- resNITSFI 
+
+resNITELI <- results(dds, contrast=c("type","NIT","ELI"))
+resNITELI
+
+resSFIELI <- results(dds, contrast=c("type","SFI","ELI"))
+resSFIELI
+
+table(resNITSFI$padj < 0.05)
+# genes con un p valor ajustado < 0.1 (consideramos )
+sum(resNITSFI$padj < 0.1, na.rm=TRUE)
+
+resSig <- subset(resNITSFI, padj < 0.1)
+head(resSig[ order(resSig$log2FoldChange), ])
+```
+
+
+3.8 plotting results
+3.8.1 counts plots
+
+```{r}
+topGene <- rownames(res)[which.min(res$padj)]
+
+library("ggbeeswarm")
+
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("type","muestra"),returnData = TRUE)
+ggplot(geneCounts, aes(x = type, y = count, color = muestra, group = muestra)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()
+```
+
+3.8.2 MA-Plot
+
+```{r}
+library("apeglm")
+resultsNames(dds)
+res <- lfcShrink(dds, coef="type_SFI_vs_NIT", type="apeglm")
+class(res)
+colnames(res)
+summary(res)
+plotMA(res, ylim = c(-5, 5))
+
+plotMA(res, ylim = c(-5,5))
+topGene <- rownames(res)[which.min(res$padj)]
+with(res[topGene, ], {
+  points(baseMean, log2FoldChange, col="dodgerblue", cex=2, lwd=2)
+  text(baseMean, log2FoldChange, topGene, pos=2, col="dodgerblue")
+})
+```
+
+
+3.8.3 Gene clustering
+
+```{r}
+library("genefilter")
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+
+mat  <- assay(vsd)[topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("muestra","type")])
+pheatmap(mat, annotation_col = anno)
+```
+
+
+3.8.4 Ploting fold changes in genomic space
+
+```{r, eval=FALSE}
+genes <- data.frame(orig=rownames(cts))
+genes$modif <- gsub("\\..*", "", genes$orig, fixed = FALSE)
+library("org.Hs.eg.db")
+db <- org.Hs.eg.db
+keys <- gsub("\\..*", "",row.names(res), fixed = FALSE)
+res$symbol <- mapIds(db, keys, "SYMBOL", "ENSEMBL")
+
+library("Gviz")
+window <- resGR[topGene] + 1e6
+strand(window) <- "*"
+resGRsub <- res[res %over% window]
+naOrDup <- is.na(resGRsub$symbol) | duplicated(resGRsub$symbol)
+resGRsub$group <- ifelse(naOrDup, names(resGRsub), resGRsub$symbol)
+status <- factor(ifelse(resGRsub$padj < 0.1 & !is.na(resGRsub$padj), "sig", "notsig"))
+```
+
+3.9 Annotating and exporting results
+
+```{r}
+library("AnnotationDbi")
+columns(db)
+res$symbol <- mapIds(db,
+                     keys=gsub("\\..*", "",row.names(res), fixed = FALSE),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+como función
+
+```{r, include=FALSE,eval=FALSE}
+gen.dif.exp <- function(fichero,ctrst,tit){
+  res <- results(fichero,contrast = ctrst)
+  table(res$padj < 0.05)
+  # genes con un p valor ajustado < 0.1 (consideramos )
+  sum(res$padj < 0.1, na.rm=TRUE)
+}
+
+gen.dif.exp(dds,c("type","NIT","SFI"),"NIT vs SFI")
+#gen.dif.exp(dds,c("type","NIT","ELI"),"NIT vs ELI")
+#gen.dif.exp(dds,c("type","SFI","ELI"),"SFI vs ELI")
+
+```
+
+
+
+
+
